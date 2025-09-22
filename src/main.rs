@@ -1,5 +1,8 @@
+use std::collections::HashSet;
+use std::hash::Hash;
 use std::io::{self, ErrorKind};
-use std::net::{Ipv4Addr, UdpSocket};
+use std::net::{IpAddr, Ipv4Addr, UdpSocket};
+use std::str::FromStr;
 use std::time::Duration;
 
 use enigo::{Enigo, Keyboard, Mouse};
@@ -11,16 +14,63 @@ const BROADCAST_PORT: u16 = 42830;
 const SUBSCRIPTION_PORT: u16 = 42831;
 const TIMEOUT: Duration = Duration::from_secs(5);
 
+fn parse_known_devices<T: FromStr + Hash + Eq>() -> HashSet<T> {
+    /// A text file with one IP address or MAC address on each line.
+    /// Included at compile time for now, until I figure out an alternative I like.
+    const KNOWN_DEVICES_TXT: &str = include_str!("../devices.txt");
+
+    KNOWN_DEVICES_TXT
+        .lines()
+        .map(|l| l.trim())
+        .flat_map(|l| l.parse())
+        .collect()
+}
+
 fn main() -> io::Result<()> {
     let mut buf = vec![0; 2048];
     let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, BROADCAST_PORT))?;
+
+    let known_ips = parse_known_devices::<IpAddr>();
+    let known_macs = parse_known_devices::<MacAddr>();
+
+    if known_ips.is_empty() && known_macs.is_empty() {
+        eprintln!(
+            "Error: A `devices.txt` file was present, but no device addresses were found inside."
+        );
+        std::process::exit(1);
+    } else {
+        println!("Listening for announcements from:");
+        for addr in &known_ips {
+            println!("  - {addr}");
+        }
+        for addr in &known_macs {
+            println!("  - {addr}");
+        }
+    }
+
     loop {
         let (len, addr) = socket.recv_from(&mut buf)?;
         let data = &buf[..len];
 
-        let Ok(BroadcastPacket::Ad(ad)) = serde_json::from_slice(data) else {
-            continue;
+        let ip = addr.ip();
+
+        let ad = match serde_json::from_slice(data) {
+            Ok(BroadcastPacket::Ad(ad)) => ad,
+            Err(e) => {
+                eprintln!("Warning: Failed to parse message from device at {ip}: {e}");
+                eprintln!(
+                    "Raw message (assuming text): {}",
+                    String::from_utf8_lossy(data),
+                );
+                continue;
+            }
         };
+
+        let mac = ad.mac;
+
+        if !known_macs.contains(&mac) && !known_ips.contains(&ip) {
+            println!("Ignoring announcement from unrecognized device: {mac} @ {ip}");
+        }
 
         let sub = Subscription {
             update_freq: Some(100),
@@ -28,20 +78,18 @@ fn main() -> io::Result<()> {
         };
 
         let conn = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, SUBSCRIPTION_PORT))?;
-        conn.connect((addr.ip(), ad.port))?;
+        conn.connect((ip, ad.port))?;
 
         let packet = serde_json::to_string(&SubscriptionPacket::Sub(sub)).unwrap();
 
         conn.send(packet.as_bytes())?;
-        if let Ok(addr) = conn.peer_addr() {
-            println!("connected to {addr}");
-        }
+        println!("connected to {mac} @ {ip}");
 
         // yeah stop listening for new ads while already connected I guess
         // don't even bother spawning a task!
         // not like this program has anything better to do
         if let Err(e) = handle_connection(conn) {
-            println!("conn died: {e}");
+            println!("connection to {mac} @ {ip} died: {e}");
         }
     }
 }
