@@ -1,5 +1,6 @@
-use std::io;
+use std::io::{self, ErrorKind};
 use std::net::{Ipv4Addr, UdpSocket};
+use std::time::Duration;
 
 use enigo::{Enigo, Keyboard, Mouse};
 
@@ -8,6 +9,7 @@ use types::*;
 
 const BROADCAST_PORT: u16 = 42830;
 const SUBSCRIPTION_PORT: u16 = 42831;
+const TIMEOUT: Duration = Duration::from_secs(5);
 
 fn main() -> io::Result<()> {
     let mut buf = vec![0; 2048];
@@ -31,7 +33,9 @@ fn main() -> io::Result<()> {
         let packet = serde_json::to_string(&SubscriptionPacket::Sub(sub)).unwrap();
 
         conn.send(packet.as_bytes())?;
-        println!("connected to {}", addr.ip());
+        if let Ok(addr) = conn.peer_addr() {
+            println!("connected to {addr}");
+        }
 
         // yeah stop listening for new ads while already connected I guess
         // don't even bother spawning a task!
@@ -47,14 +51,28 @@ fn handle_connection(socket: UdpSocket) -> io::Result<()> {
 
     let mut enigo = Enigo::new(&enigo::Settings::default()).unwrap();
 
-    // TODO: keepalive timeout: keepalive is sent every so often,
-    // so if we go a bit without seeing ANY message, disconnect.
+    socket.set_read_timeout(Some(TIMEOUT))?;
 
     let mut cursor = (0, 0);
 
     loop {
-        let len = socket.recv(&mut buf)?;
-        let data = &buf[..len];
+        let data = match socket.recv(&mut buf) {
+            Ok(len) => &buf[..len],
+            Err(e) => {
+                break match e.kind() {
+                    // assume the TV dropped the connection
+                    // gracefully return and let the parent loop find a new connection
+                    ErrorKind::WouldBlock | ErrorKind::TimedOut => {
+                        if let Ok(addr) = socket.peer_addr() {
+                            println!("disconnected from {addr}");
+                        }
+                        Ok(())
+                    }
+                    // some kind of actual non-timeout network error
+                    _ => Err(e),
+                };
+            }
+        };
 
         match serde_json::from_slice::<UnicastPacket>(data) {
             // keepalive
