@@ -1,7 +1,7 @@
-use std::{io, net::Ipv4Addr};
+use std::io;
+use std::net::{Ipv4Addr, UdpSocket};
 
 use enigo::{Enigo, Keyboard, Mouse};
-use tokio::net::UdpSocket;
 
 pub mod types;
 use types::*;
@@ -9,12 +9,11 @@ use types::*;
 const BROADCAST_PORT: u16 = 42830;
 const SUBSCRIPTION_PORT: u16 = 42831;
 
-#[tokio::main(flavor = "current_thread")]
-async fn main() -> io::Result<()> {
+fn main() -> io::Result<()> {
     let mut buf = vec![0; 2048];
-    let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, BROADCAST_PORT)).await?;
+    let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, BROADCAST_PORT))?;
     loop {
-        let (len, addr) = socket.recv_from(&mut buf).await?;
+        let (len, addr) = socket.recv_from(&mut buf)?;
         let data = &buf[..len];
 
         let Ok(BroadcastPacket::Ad(ad)) = serde_json::from_slice(data) else {
@@ -26,41 +25,40 @@ async fn main() -> io::Result<()> {
             filter: Some(vec![Sensor::Coordinate]),
         };
 
-        let conn = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, SUBSCRIPTION_PORT)).await?;
-        conn.connect((addr.ip(), ad.port)).await?;
+        let conn = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, SUBSCRIPTION_PORT))?;
+        conn.connect((addr.ip(), ad.port))?;
 
         let packet = serde_json::to_string(&SubscriptionPacket::Sub(sub)).unwrap();
 
-        conn.send(packet.as_bytes()).await?;
+        conn.send(packet.as_bytes())?;
         println!("connected to {}", addr.ip());
 
         // yeah stop listening for new ads while already connected I guess
         // don't even bother spawning a task!
         // not like this program has anything better to do
-        if let Err(e) = handle_connection(conn).await {
+        if let Err(e) = handle_connection(conn) {
             println!("conn died: {e}");
         }
     }
 }
 
-async fn handle_connection(socket: UdpSocket) -> io::Result<()> {
+fn handle_connection(socket: UdpSocket) -> io::Result<()> {
     let mut buf = vec![0; 2048];
 
     let mut enigo = Enigo::new(&enigo::Settings::default()).unwrap();
 
     // TODO: keepalive timeout: keepalive is sent every so often,
     // so if we go a bit without seeing ANY message, disconnect.
-    // Hmm, did we even need tokio? I guess it doesn't hurt... much
 
     let mut cursor = (0, 0);
 
     loop {
-        let len = socket.recv(&mut buf).await?;
+        let len = socket.recv(&mut buf)?;
         let data = &buf[..len];
 
         match serde_json::from_slice::<UnicastPacket>(data) {
             // keepalive
-            Ok(UnicastPacket::Keepalive) => _ = socket.send(b"{}").await?,
+            Ok(UnicastPacket::Keepalive) => _ = socket.send(b"{}")?,
             // actual packet (ignore enigo errors I guess)
             Ok(packet) => _ = handle_packet(packet, &mut enigo, &mut cursor),
             // unknown packet
@@ -78,7 +76,8 @@ fn handle_packet(
     cursor: &mut (i32, i32),
 ) -> enigo::InputResult<()> {
     match packet {
-        // handled before we get to this function, because it's async and everything else here isn't
+        // handled before we get to this function,
+        // because it's the only one that uses the socket
         UnicastPacket::Keepalive => unreachable!(),
 
         UnicastPacket::Input { parameters } => {
