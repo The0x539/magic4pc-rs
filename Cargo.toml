@@ -1,0 +1,12 @@
+[package]
+name = "magic4pc"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+enigo = "0.6.1"
+num_enum = "0.7.4"
+serde = { version = "1.0.226", features = ["derive"] }
+serde_json = "1.0.145"
+serde_with = { version = "3.14.1", features = ["base64"] }
+tokio = { version = "1.47.1", features = ["macros", "rt", "net"] }
