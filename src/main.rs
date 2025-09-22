@@ -52,6 +52,8 @@ async fn handle_connection(socket: UdpSocket) -> io::Result<()> {
     // so if we go a bit without seeing ANY message, disconnect.
     // Hmm, did we even need tokio? I guess it doesn't hurt... much
 
+    let mut cursor = (0, 0);
+
     loop {
         let len = socket.recv(&mut buf).await?;
         let data = &buf[..len];
@@ -60,7 +62,7 @@ async fn handle_connection(socket: UdpSocket) -> io::Result<()> {
             // keepalive
             Ok(UnicastPacket::Keepalive) => _ = socket.send(b"{}").await?,
             // actual packet (ignore enigo errors I guess)
-            Ok(packet) => _ = handle_packet(packet, &mut enigo),
+            Ok(packet) => _ = handle_packet(packet, &mut enigo, &mut cursor),
             // unknown packet
             Err(e) => println!(
                 "couldn't parse packet: {e} ({})",
@@ -70,7 +72,11 @@ async fn handle_connection(socket: UdpSocket) -> io::Result<()> {
     }
 }
 
-fn handle_packet(packet: UnicastPacket, enigo: &mut Enigo) -> enigo::InputResult<()> {
+fn handle_packet(
+    packet: UnicastPacket,
+    enigo: &mut Enigo,
+    cursor: &mut (i32, i32),
+) -> enigo::InputResult<()> {
     match packet {
         // handled before we get to this function, because it's async and everything else here isn't
         UnicastPacket::Keepalive => unreachable!(),
@@ -122,7 +128,16 @@ fn handle_packet(packet: UnicastPacket, enigo: &mut Enigo) -> enigo::InputResult
 
             let x = i32::from_le_bytes(payload[..4].try_into().unwrap());
             let y = i32::from_le_bytes(payload[4..].try_into().unwrap());
-            enigo.move_mouse(x, y, enigo::Coordinate::Abs)
+
+            // this way, you can put the remote down and move the mouse with another device
+            // and not have to wait for the remote to time out.
+            // otherwise, it constantly tries to stay glued to the TV pointer.
+            let new_cursor = (x, y);
+            if new_cursor != *cursor {
+                *cursor = new_cursor;
+                enigo.move_mouse(x, y, enigo::Coordinate::Abs)?;
+            }
+            Ok(())
         }
     }
 }
